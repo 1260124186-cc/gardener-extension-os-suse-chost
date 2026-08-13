@@ -1,0 +1,31 @@
+---
+apiVersion: extensions.gardener.cloud/v1alpha1
+kind: OperatingSystemConfig
+metadata:
+  name: pool-01-original
+  namespace: default
+spec:
+  type: suse-chost
+  units:
+  - name: containerd.service
+    dropIns:
+    - name: preconfig-script.conf
+      content: |
+        [Service]
+        ExecStartPre="/var/lib/example/preconf-script.sh"
+  files:
+  - path: /var/lib/example/preconf-script.sh
+    permissions: 0755
+    encoding: b64
+    content:
+      secretRef:
+        name: containerd-preconf-script
+        dataKey: preconf-script.sh
+  - path: /etc/sysctl.d/99-k8s-general.conf
+    permissions: 0644
+    content:
+      inline:
+        data: |
+          # A higher vm.max_map_count is great for elasticsearch, mongo, or other mmap users
+          # See https://github.com/kubernetes/kops/issues/1340
+          vm.max_map_count = 135217728

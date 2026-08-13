@@ -1,0 +1,33 @@
+image:
+  repository: europe-docker.pkg.dev/gardener-project/public/gardener/extensions/os-suse-chost
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources: {}
+
+vpa:
+  enabled: true
+  resourcePolicy:
+    minAllowed:
+      memory: 64Mi
+  updatePolicy:
+    updateMode: "Recreate"
+
+controllers:
+  concurrentSyncs: 5
+  ignoreOperationAnnotation: false
+  heartbeat:
+    renewIntervalSeconds: 30
+
+disableControllers: []
+
+gardener:
+  version: ""
+  gardenlet:
+    featureGates: {}
+
+# settings for metrics, e.g. scraping by seed-prometheus
+metrics:
+  # enable metrics scraping
+  enableScraping: true
+  port: 8080

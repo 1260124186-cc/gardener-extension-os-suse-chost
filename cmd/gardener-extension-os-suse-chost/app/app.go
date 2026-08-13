@@ -1,0 +1,127 @@
+// SPDX-FileCopyrightText: 2024 SAP SE or an SAP affiliate company and Gardener contributors
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	extcontroller "github.com/gardener/gardener/extensions/pkg/controller"
+	controllercmd "github.com/gardener/gardener/extensions/pkg/controller/cmd"
+	"github.com/gardener/gardener/extensions/pkg/controller/heartbeat"
+	heartbeatcmd "github.com/gardener/gardener/extensions/pkg/controller/heartbeat/cmd"
+	osccontroller "github.com/gardener/gardener/extensions/pkg/controller/operatingsystemconfig"
+	"github.com/gardener/gardener/extensions/pkg/util"
+	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	componentbaseconfigv1alpha1 "k8s.io/component-base/config/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
+	"github.com/gardener/gardener-extension-os-suse-chost/pkg/controller/operatingsystemconfig"
+	"github.com/gardener/gardener-extension-os-suse-chost/pkg/susechost"
+)
+
+// NewControllerCommand returns a new Command with a new Generator
+func NewControllerCommand(ctx context.Context) *cobra.Command {
+	var (
+		generalOpts = &controllercmd.GeneralOptions{}
+		restOpts    = &controllercmd.RESTOptions{}
+		mgrOpts     = &controllercmd.ManagerOptions{
+			LeaderElection:          true,
+			LeaderElectionID:        controllercmd.LeaderElectionNameID(susechost.ControllerName),
+			LeaderElectionNamespace: os.Getenv("LEADER_ELECTION_NAMESPACE"),
+		}
+		ctrlOpts = &controllercmd.ControllerOptions{
+			MaxConcurrentReconciles: 5,
+		}
+
+		heartbeatCtrlOpts = &heartbeatcmd.Options{
+			ExtensionName:        susechost.ControllerName,
+			RenewIntervalSeconds: 30,
+			Namespace:            os.Getenv("LEADER_ELECTION_NAMESPACE"),
+		}
+
+		reconcileOpts = &controllercmd.ReconcilerOptions{}
+
+		controllerSwitches = controllercmd.NewSwitchOptions(
+			controllercmd.Switch(osccontroller.ControllerName, operatingsystemconfig.AddToManager),
+			controllercmd.Switch(heartbeat.ControllerName, heartbeat.AddToManager),
+		)
+
+		aggOption = controllercmd.NewOptionAggregator(
+			generalOpts,
+			restOpts,
+			mgrOpts,
+			ctrlOpts,
+			controllercmd.PrefixOption("heartbeat-", heartbeatCtrlOpts),
+			reconcileOpts,
+			controllerSwitches,
+		)
+	)
+
+	cmd := &cobra.Command{
+		Use: "os-" + susechost.ControllerName + "-controller-manager",
+
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := aggOption.Complete(); err != nil {
+				return fmt.Errorf("error completing options: %w", err)
+			}
+
+			if err := heartbeatCtrlOpts.Validate(); err != nil {
+				return err
+			}
+
+			// TODO: Make these flags configurable via command line parameters or component config file.
+			util.ApplyClientConnectionConfigurationToRESTConfig(&componentbaseconfigv1alpha1.ClientConnectionConfiguration{
+				QPS:   100.0,
+				Burst: 130,
+			}, restOpts.Completed().Config)
+
+			completedMgrOpts := mgrOpts.Completed().Options()
+			completedMgrOpts.Client = client.Options{
+				Cache: &client.CacheOptions{
+					DisableFor: []client.Object{
+						&corev1.Secret{}, // applied for OperatingSystemConfig Secret references
+					},
+				},
+			}
+
+			mgr, err := manager.New(restOpts.Completed().Config, completedMgrOpts)
+			if err != nil {
+				return fmt.Errorf("could not instantiate manager: %w", err)
+			}
+
+			if err := extcontroller.AddToScheme(mgr.GetScheme()); err != nil {
+				return fmt.Errorf("could not update manager scheme: %w", err)
+			}
+
+			ctrlOpts.Completed().Apply(&operatingsystemconfig.DefaultAddOptions.Controller)
+			// Todo: The cache sync timeout is set to 5 minutes to prevent the controller from crashing due to reported timeouts on 19.03.2026. This should be removed once the underlying issue is resolved.
+			operatingsystemconfig.DefaultAddOptions.Controller.CacheSyncTimeout = 5 * time.Minute
+
+			heartbeatCtrlOpts.Completed().Apply(&heartbeat.DefaultAddOptions)
+
+			reconcileOpts.Completed().Apply(&operatingsystemconfig.DefaultAddOptions.IgnoreOperationAnnotation)
+			operatingsystemconfig.DefaultAddOptions.ExtensionClasses = generalOpts.Completed().ExtensionClasses
+
+			if err := controllerSwitches.Completed().AddToManager(ctx, mgr); err != nil {
+				return fmt.Errorf("could not add controller to manager: %w", err)
+			}
+
+			if err := mgr.Start(ctx); err != nil {
+				return fmt.Errorf("error running manager: %w", err)
+			}
+
+			return nil
+		},
+	}
+
+	aggOption.AddFlags(cmd.Flags())
+
+	return cmd
+}
